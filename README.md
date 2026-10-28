@@ -84,16 +84,17 @@ Open <http://localhost:4173>. The default backend URL is `http://127.0.0.1:8000`
 
 The backend creates the SQLite tables on startup. By default, the database is `backend/aqg.db` when the backend is started from its folder. Set `DATABASE_URL` to use another SQLAlchemy database URL.
 
-## Deploying with Vercel and Render
+## Free-tier deployment with Vercel, Render, and Neon
 
-The frontend is a static site for Vercel. The FastAPI backend and persistent PostgreSQL database run on Render; the frontend and API are separate services.
+The frontend is a static site on Vercel Hobby, the FastAPI backend runs on Render's free web-service plan, and persistent PostgreSQL is hosted by Neon's free plan. This avoids a monthly hosting subscription within provider limits, but free services can sleep, pause, or have usage and storage caps. OpenAI API usage, if enabled, is billed separately.
 
-1. Push the project to a GitHub repository. Keep `.env`, database files, virtual environments, and generated build output out of Git; `.gitignore` excludes them.
-2. In Render, create a new Blueprint from the repository and use the root `render.yaml`. The blueprint configures the API and PostgreSQL database. The `starter` web-service plan and `basic-256mb` database plan can incur charges; review Render's current pricing before creating the services. For the initial setup, set `ALLOWED_ORIGINS` to `http://localhost:4173`; set `OPENAI_API_KEY` only if AI generation is required.
-3. Copy the deployed API base URL from Render, for example `https://your-api.onrender.com`.
-4. In Vercel, import the same GitHub repository. Keep the project root at the repository root so Vercel uses `vercel.json`. Add the environment variable `AQG_API_BASE_URL` with the Render API base URL for each environment you deploy (Production, Preview, and Development as applicable), then deploy.
-5. After Vercel provides the site URL, update Render's `ALLOWED_ORIGINS` to that exact origin, such as `https://your-project.vercel.app` (no trailing slash). Include additional origins as comma-separated values if needed, then redeploy/restart the API.
-6. Open the Vercel URL and verify the site and API. If you change the Vercel domain, update `ALLOWED_ORIGINS` in Render and redeploy/restart the API.
+1. Keep `.env`, database files, virtual environments, and generated build output out of Git; `.gitignore` excludes them.
+2. Create a free PostgreSQL project on Neon. Copy its pooled connection string, including the SSL query options supplied by Neon.
+3. In Render, create a Blueprint from this repository using the root `render.yaml`. The blueprint configures a free API service. In Render's environment settings, set `DATABASE_URL` to Neon's connection string and `ALLOWED_ORIGINS` initially to `http://localhost:4173`. Set `OPENAI_API_KEY` only if AI generation is required; it can remain unset otherwise.
+4. Copy the deployed API base URL from Render, for example `https://your-api.onrender.com`.
+5. In Vercel, import the same GitHub repository. Keep the project root at the repository root so Vercel uses `vercel.json`. Add the environment variable `AQG_API_BASE_URL` with the Render API base URL for each environment you deploy (Production, Preview, and Development as applicable), then deploy.
+6. After Vercel provides the site URL, update Render's `ALLOWED_ORIGINS` to that exact origin, such as `https://your-project.vercel.app` (no trailing slash). Include additional origins as comma-separated values if needed, then redeploy/restart the API.
+7. Open the Vercel URL and verify the site and API. If you change the Vercel domain, update `ALLOWED_ORIGINS` in Render and redeploy/restart the API.
 
 The Vercel build copies `frontend/` into `dist/` and generates `config.js` from `AQG_API_BASE_URL`. The local `frontend/config.js` continues to use `http://127.0.0.1:8000` for local development. Do not put backend secrets such as `SECRET_KEY` or `OPENAI_API_KEY` into Vercel or frontend files.
 
@@ -104,7 +105,7 @@ $env:AQG_API_BASE_URL = "https://your-api.onrender.com"
 npm run build
 ```
 
-The Render blueprint generates a production `SECRET_KEY` and connects the backend to managed PostgreSQL. It does not configure a live OpenAI key. Render and Vercel accounts, GitHub access, and any provider charges are separate from this repository setup.
+The Render blueprint generates a production `SECRET_KEY`; you provide the Neon `DATABASE_URL` and optionally an OpenAI key in Render's environment settings. The free Render web service sleeps after inactivity, and free database providers can pause or impose usage limits, so expect slower first requests and check provider limits before relying on this setup for important data. Keep backups of study data you cannot afford to lose. OpenAI API usage may incur separate charges.
 
 ## API routes
 
