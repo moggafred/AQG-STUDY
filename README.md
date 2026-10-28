@@ -89,10 +89,10 @@ The backend creates the SQLite tables on startup. By default, the database is `b
 The frontend is a static site for Vercel. The FastAPI backend and persistent PostgreSQL database run on Render; the frontend and API are separate services.
 
 1. Push the project to a GitHub repository. Keep `.env`, database files, virtual environments, and generated build output out of Git; `.gitignore` excludes them.
-2. In Render, create a new Blueprint from the repository and use the root `render.yaml`. The blueprint configures the API and PostgreSQL database. The `starter` web-service plan and `basic-256mb` database plan can incur charges; review Render's current pricing before creating the services.
-3. Configure `ALLOWED_ORIGINS` for the Render API with the exact Vercel site origin, such as `https://your-project.vercel.app` (no trailing slash). Include additional origins as comma-separated values if needed. Set `OPENAI_API_KEY` in Render only if AI generation is required; it can be left blank otherwise.
-4. Copy the deployed API base URL from Render, for example `https://your-api.onrender.com`.
-5. In Vercel, import the same GitHub repository. Keep the project root at the repository root so Vercel uses `vercel.json`. Add the environment variable `AQG_API_BASE_URL` with the Render API base URL for each environment you deploy (Production, Preview, and Development as applicable), then deploy.
+2. In Render, create a new Blueprint from the repository and use the root `render.yaml`. The blueprint configures the API and PostgreSQL database. The `starter` web-service plan and `basic-256mb` database plan can incur charges; review Render's current pricing before creating the services. For the initial setup, set `ALLOWED_ORIGINS` to `http://localhost:4173`; set `OPENAI_API_KEY` only if AI generation is required.
+3. Copy the deployed API base URL from Render, for example `https://your-api.onrender.com`.
+4. In Vercel, import the same GitHub repository. Keep the project root at the repository root so Vercel uses `vercel.json`. Add the environment variable `AQG_API_BASE_URL` with the Render API base URL for each environment you deploy (Production, Preview, and Development as applicable), then deploy.
+5. After Vercel provides the site URL, update Render's `ALLOWED_ORIGINS` to that exact origin, such as `https://your-project.vercel.app` (no trailing slash). Include additional origins as comma-separated values if needed, then redeploy/restart the API.
 6. Open the Vercel URL and verify the site and API. If you change the Vercel domain, update `ALLOWED_ORIGINS` in Render and redeploy/restart the API.
 
 The Vercel build copies `frontend/` into `dist/` and generates `config.js` from `AQG_API_BASE_URL`. The local `frontend/config.js` continues to use `http://127.0.0.1:8000` for local development. Do not put backend secrets such as `SECRET_KEY` or `OPENAI_API_KEY` into Vercel or frontend files.
