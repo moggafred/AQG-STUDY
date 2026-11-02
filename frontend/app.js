@@ -9,6 +9,10 @@ const state = {
   resources: [],
   history: [],
   activeQuiz: null,
+  generatingQuiz: false,
+  quizError: '',
+  generatingResource: false,
+  resourceError: '',
   assessmentResult: null,
   attemptResult: null,
   activeResourceId: null,
@@ -154,6 +158,41 @@ function enhanceDashboard() {
   }
 
   const questionType = document.querySelector('#quiz-form select[name="question_type"]');
+  const quizForm = document.querySelector('#quiz-form');
+  const quizButton = quizForm?.querySelector('button[type="submit"]');
+  if (quizForm && quizButton) {
+    quizForm.setAttribute('aria-busy', String(state.generatingQuiz));
+    quizButton.disabled = state.generatingQuiz;
+    quizButton.textContent = state.generatingQuiz ? 'Generating practice...' : 'Generate practice →';
+  }
+  const quizArea = document.querySelector('#quiz-area');
+  if (quizArea && (state.generatingQuiz || state.quizError)) {
+    const status = document.createElement('p');
+    status.className = state.generatingQuiz ? 'generation-status' : 'generation-error';
+    status.setAttribute('role', state.generatingQuiz ? 'status' : 'alert');
+    status.textContent = state.generatingQuiz
+      ? 'Generating your practice set. This can take up to a minute.'
+      : state.quizError;
+    quizArea.prepend(status);
+  }
+  const resourceForm = document.querySelector('#resource-form');
+  const resourceButton = resourceForm?.querySelector('button[type="submit"]');
+  if (resourceForm && resourceButton) {
+    resourceForm.setAttribute('aria-busy', String(state.generatingResource));
+    resourceButton.disabled = state.generatingResource;
+    resourceButton.textContent = state.generatingResource ? 'Creating resource...' : 'Create resource →';
+  }
+  if (resourceForm && (state.generatingResource || state.resourceError)) {
+    const status = document.createElement('p');
+    status.id = 'resource-generation-status';
+    status.className = state.generatingResource ? 'generation-status' : 'generation-error';
+    status.setAttribute('role', state.generatingResource ? 'status' : 'alert');
+    status.textContent = state.generatingResource
+      ? 'Creating your study resource. This can take up to a minute.'
+      : state.resourceError;
+    resourceForm.after(status);
+  }
+
   if (questionType) {
     [
       ['essay', 'Essay'],
@@ -346,6 +385,12 @@ function showAuthError(error) {
   if (node) node.textContent = error.message || 'Please try again.';
 }
 
+function generationErrorMessage(error) {
+  return error instanceof TypeError
+    ? 'Could not connect to the API. Check that the backend is running and try again.'
+    : error.message || 'Generation failed. Please try again.';
+}
+
 app.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
@@ -474,14 +519,25 @@ app.addEventListener('submit', async (event) => {
       state.message = 'Study material uploaded and processed.';
       render();
     } else if (form.id === 'quiz-form') {
+      if (state.generatingQuiz) return;
+      state.generatingQuiz = true;
+      state.quizError = '';
+      state.activeQuiz = null;
+      state.message = '';
+      render();
       const result = await request('/api/quizzes/generate', { method: 'POST', body: JSON.stringify({ topic: data.topic, question_type: data.question_type, difficulty: data.difficulty, count: Number(data.count), document_id: data.document_id || undefined }) });
+      if (!result?.quiz || !Array.isArray(result.questions) || !result.questions.length) {
+        throw new Error('The generation service returned no practice questions. Please try again.');
+      }
       state.activeQuiz = result;
       state.assessmentResult = null;
       state.attemptResult = null;
-      await refreshDashboard();
       state.message = 'Your practice set is ready.';
+      state.generatingQuiz = false;
       render();
       document.querySelector('#quiz-area')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      await refreshDashboard();
+      render();
     } else if (form.id === 'assessment-form') {
       if (!window.confirm('Submit this assessment now? You can review your answers after submission.')) return;
       const answers = state.activeQuiz.questions.map(question => {
@@ -499,15 +555,47 @@ app.addEventListener('submit', async (event) => {
       render();
       document.querySelector('#history')?.scrollIntoView({ behavior: 'smooth' });
     } else if (form.id === 'resource-form') {
+      if (state.generatingResource) return;
+      state.generatingResource = true;
+      state.resourceError = '';
+      state.activeResourceId = null;
+      state.message = '';
+      render();
       const result = await request('/api/study_resources/generate', { method: 'POST', body: JSON.stringify({ kind: data.kind, topic: data.topic, document_id: data.document_id || undefined, source_text: data.source_text || undefined }) });
+      if (!result?.resource?.id) {
+        throw new Error('The generation service returned no study resource. Please try again.');
+      }
+      state.resources = [
+        result.resource,
+        ...state.resources.filter(resource => resource.id !== result.resource.id),
+      ];
       state.activeResourceId = result.resource.id;
-      await refreshDashboard();
       state.message = 'Study resource saved.';
+      state.generatingResource = false;
+      render();
+      document.querySelector('#study-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      await refreshDashboard();
       render();
     }
   } catch (error) {
     if (form.id === 'auth-form') showAuthError(error);
-    else setMessage(error.message);
+    else if (form.id === 'quiz-form') {
+      state.generatingQuiz = false;
+      state.quizError = state.activeQuiz ? '' : generationErrorMessage(error);
+      state.message = state.activeQuiz
+        ? `Your practice set is ready, but the dashboard could not refresh: ${error.message}`
+        : '';
+      render();
+      document.querySelector('#quiz-area')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (form.id === 'resource-form') {
+      state.generatingResource = false;
+      state.resourceError = state.activeResourceId ? '' : generationErrorMessage(error);
+      state.message = state.activeResourceId
+        ? `Your study resource is ready, but the dashboard could not refresh: ${error.message}`
+        : '';
+      render();
+      document.querySelector('#study-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else setMessage(error.message);
   }
 });
 
