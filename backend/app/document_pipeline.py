@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable
 
-import fitz
+import pymupdf
 
 
 class DocumentProcessingError(ValueError):
@@ -21,14 +21,14 @@ class ExtractedPage:
 
 def extract_pdf_pages(content: bytes) -> list[ExtractedPage]:
     try:
-        with fitz.open(stream=content, filetype='pdf') as pdf:
+        with pymupdf.open(stream=content, filetype='pdf') as pdf:
             if pdf.is_encrypted:
                 raise DocumentProcessingError('Password-protected PDFs are not supported.')
             pages = [
                 ExtractedPage(page_number=index + 1, text=page.get_text('text').strip())
                 for index, page in enumerate(pdf)
             ]
-    except (fitz.FileDataError, fitz.EmptyFileError) as exc:
+    except (pymupdf.FileDataError, pymupdf.EmptyFileError) as exc:
         raise DocumentProcessingError('The uploaded file is not a readable PDF.') from exc
 
     if not any(page.text for page in pages):
