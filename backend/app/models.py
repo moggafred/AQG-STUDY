@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 
 from app.database import Base
 
@@ -35,10 +35,12 @@ class Document(Base):
 class DocumentChunk(Base):
     __tablename__ = 'document_chunks'
     id = Column(String, primary_key=True)
-    document_id = Column(String, ForeignKey('documents.id'), nullable=False)
+    document_id = Column(String, ForeignKey('documents.id'), nullable=False, index=True)
     content = Column(Text, nullable=False)
     source_page = Column(Integer, default=1)
     chunk_index = Column(Integer, default=0)
+    embedding = Column(JSON, nullable=True)
+    embedding_model = Column(String, nullable=True)
 
 
 class Quiz(Base):
@@ -66,6 +68,43 @@ class Question(Base):
     marks = Column(Integer, default=1)
 
 
+class QuestionQualityReview(Base):
+    __tablename__ = 'question_quality_reviews'
+    question_id = Column(String, ForeignKey('questions.id'), primary_key=True)
+    status = Column(String, nullable=False)
+    duplicate_of_question = Column(Integer, nullable=True)
+    source_support = Column(String, nullable=False)
+    source_overlap = Column(Float, nullable=True)
+    semantic_similarity = Column(Float, nullable=True)
+    review_note = Column(Text, nullable=False)
+
+
+class QuizGenerationRun(Base):
+    __tablename__ = 'quiz_generation_runs'
+    quiz_id = Column(String, ForeignKey('quizzes.id'), primary_key=True)
+    owner_id = Column(String, ForeignKey('users.id'), nullable=False, index=True)
+    generation_condition = Column(String, nullable=False)
+    source_document_id = Column(String, nullable=True)
+    retrieved_context = Column(Text, nullable=False)
+    generation_time_ms = Column(Integer, nullable=False)
+
+
+class QuestionRating(Base):
+    __tablename__ = 'question_ratings'
+    id = Column(String, primary_key=True)
+    question_id = Column(String, ForeignKey('questions.id'), nullable=False, index=True)
+    reviewer_id = Column(String, ForeignKey('users.id'), nullable=False, index=True)
+    relevance = Column(Integer, nullable=False)
+    source_alignment = Column(Integer, nullable=False)
+    answer_correctness = Column(Integer, nullable=False)
+    answerability = Column(Integer, nullable=False)
+    clarity = Column(Integer, nullable=False)
+    grammar = Column(Integer, nullable=False)
+    educational_usefulness = Column(Integer, nullable=False)
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class AssessmentAttempt(Base):
     __tablename__ = 'assessment_attempts'
     id = Column(String, primary_key=True)
@@ -83,7 +122,7 @@ class AssessmentAnswerRecord(Base):
     attempt_id = Column(String, ForeignKey('assessment_attempts.id'), nullable=False)
     question_id = Column(String, nullable=False)
     user_answer = Column(Text, nullable=True)
-    is_correct = Column(Integer, default=0)
+    is_correct = Column(Integer, nullable=True)
     explanation = Column(Text, nullable=True)
 
 

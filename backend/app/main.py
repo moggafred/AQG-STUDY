@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
+import math
 import os
 import threading
 import time
@@ -12,36 +15,45 @@ from typing import Any, Dict, List
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from openai import OpenAI, OpenAIError, RateLimitError
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 load_dotenv(Path(__file__).resolve().parents[2] / '.env')
 
-from app.database import Base, engine, get_db
+from app.database import get_db
 from app.document_pipeline import (
     DocumentProcessingError,
     ExtractedPage,
+    cosine_similarity,
     extract_pdf_pages,
+    retrieve_embedded_chunks,
     retrieve_relevant_chunks,
     split_pages,
 )
+from app.embeddings import get_embedding_provider
+from app.question_validation import validate_question_batch
 from app.models import (
     AssessmentAnswerRecord,
     AssessmentAttempt,
     Document,
     DocumentChunk,
     Question,
+    QuestionQualityReview,
+    QuestionRating,
     Quiz,
+    QuizGenerationRun,
     StudyResource,
     User,
 )
 from app.schemas import (
     AssessmentSubmit,
     DocumentUpload,
+    QuestionRatingCreate,
     QuizGenerate,
     StudyGenerate,
     TokenResponse,
@@ -74,11 +86,6 @@ if not SECRET_KEY:
 ALGORITHM = 'HS256'
 security = HTTPBearer(auto_error=False)
 pwd_context = CryptContext(schemes=['bcrypt'], deprecated='auto')
-
-@app.on_event('startup')
-def startup():
-    Base.metadata.create_all(bind=engine)
-
 
 @app.get('/health')
 def health():
@@ -155,6 +162,7 @@ def upload_document(payload: DocumentUpload, db: Session = Depends(get_db), user
         raise HTTPException(status_code=400, detail='Uploaded document is empty.')
 
     chunks = split_pages([ExtractedPage(page_number=1, text=text)])
+    embeddings, embedding_model = embed_chunks([chunk.text for chunk in chunks])
     doc = Document(
         id=str(uuid.uuid4()),
         owner_id=user.id,
@@ -175,6 +183,8 @@ def upload_document(payload: DocumentUpload, db: Session = Depends(get_db), user
                 content=chunk.text,
                 source_page=chunk.page_number,
                 chunk_index=index,
+                embedding=embeddings[index],
+                embedding_model=embedding_model,
             ))
         db.commit()
         db.refresh(doc)
@@ -212,6 +222,10 @@ async def upload_pdf_document(
     if len(full_text) < 20:
         raise HTTPException(status_code=422, detail='The PDF contains too little selectable text to process.')
     chunks = split_pages(pages)
+    embeddings, embedding_model = await run_in_threadpool(
+        embed_chunks,
+        [chunk.text for chunk in chunks],
+    )
     document = Document(
         id=str(uuid.uuid4()),
         owner_id=user.id,
@@ -232,6 +246,8 @@ async def upload_pdf_document(
                 content=chunk.text,
                 source_page=chunk.page_number,
                 chunk_index=index,
+                embedding=embeddings[index],
+                embedding_model=embedding_model,
             ))
         db.commit()
         db.refresh(document)
@@ -274,7 +290,10 @@ def list_quizzes(db: Session = Depends(get_db), user: User = Depends(get_current
     result = []
     for quiz in quizzes:
         questions = db.query(Question).filter(Question.quiz_id == quiz.id).all()
-        result.append({'quiz': serialize_quiz(quiz), 'questions': [serialize_question(q) for q in questions]})
+        result.append({
+            'quiz': serialize_quiz(quiz),
+            'questions': [serialize_question_with_review(db, question) for question in questions],
+        })
     return result
 
 
@@ -284,11 +303,15 @@ def get_quiz(quiz_id: str, db: Session = Depends(get_db), user: User = Depends(g
     if not quiz:
         raise HTTPException(status_code=404, detail='Quiz not found.')
     questions = db.query(Question).filter(Question.quiz_id == quiz.id).all()
-    return {'quiz': serialize_quiz(quiz), 'questions': [serialize_question(question) for question in questions]}
+    return {
+        'quiz': serialize_quiz(quiz),
+        'questions': [serialize_question_with_review(db, question) for question in questions],
+    }
 
 
 @app.post('/api/quizzes/generate')
 def generate_quiz(payload: QuizGenerate, db: Session = Depends(get_db), user: User = Depends(get_current_user_dependency)):
+    generation_started = time.perf_counter()
     enforce_generation_rate_limit(user.id)
     source_text, source_reference = resolve_generation_source(
         db, user, payload.document_id, payload.source_text, payload.topic
@@ -312,6 +335,7 @@ def generate_quiz(payload: QuizGenerate, db: Session = Depends(get_db), user: Us
     db.add(quiz)
     stored_questions = []
     for q in questions:
+        quality_review = q.pop('quality_review')
         question = Question(
             id=str(uuid.uuid4()),
             quiz_id=quiz.id,
@@ -325,14 +349,40 @@ def generate_quiz(payload: QuizGenerate, db: Session = Depends(get_db), user: Us
             marks=1,
         )
         db.add(question)
-        stored_questions.append(serialize_question(question))
+        stored_questions.append((question, quality_review))
     try:
+        db.flush()
+        for question, quality_review in stored_questions:
+            db.add(QuestionQualityReview(
+                question_id=question.id,
+                status=quality_review['status'],
+                duplicate_of_question=quality_review['duplicate_of_question'],
+                source_support=quality_review['source_support'],
+                source_overlap=quality_review['source_overlap'],
+                semantic_similarity=quality_review['semantic_similarity'],
+                review_note=quality_review['review_note'],
+            ))
+        db.add(QuizGenerationRun(
+            quiz_id=quiz.id,
+            owner_id=user.id,
+            generation_condition='rag' if payload.document_id else 'no_retrieval',
+            source_document_id=payload.document_id,
+            retrieved_context=source_text if payload.document_id else '',
+            generation_time_ms=round((time.perf_counter() - generation_started) * 1000),
+        ))
         db.commit()
         db.refresh(quiz)
     except Exception:
         db.rollback()
         raise
-    return {'message': 'Quiz generated successfully.', 'quiz': serialize_quiz(quiz), 'questions': stored_questions}
+    return {
+        'message': 'Quiz generated successfully.',
+        'quiz': serialize_quiz(quiz),
+        'questions': [
+            serialize_question(question, quality_review)
+            for question, quality_review in stored_questions
+        ],
+    }
 
 
 @app.post('/api/study_resources/generate')
@@ -375,24 +425,31 @@ def submit_assessment(payload: AssessmentSubmit, db: Session = Depends(get_db), 
         raise HTTPException(status_code=400, detail='Answers contain duplicate or unknown question IDs.')
     answer_map = {entry.question_id: entry.answer.strip() for entry in payload.answers}
     score = 0
+    graded_total = 0
+    manual_review_count = 0
     question_results = []
 
     for question in questions:
         user_answer = answer_map.get(question.id, '').strip()
         is_correct = grade_answer(question, user_answer)
-        if is_correct:
+        if is_correct is None:
+            manual_review_count += 1
+        else:
+            graded_total += 1
+        if is_correct is True:
             score += 1
         question_results.append({
             'question_id': question.id,
             'question_text': question.question_text,
             'user_answer': user_answer,
             'is_correct': is_correct,
+            'needs_manual_review': is_correct is None,
             'correct_answer': question.correct_answer,
             'explanation': question.explanation,
         })
 
-    total = len(questions) or 1
-    percentage = round((score / total) * 100)
+    total = graded_total
+    percentage = round((score / total) * 100) if total else None
     attempt = AssessmentAttempt(
         id=str(uuid.uuid4()),
         quiz_id=quiz.id,
@@ -411,7 +468,10 @@ def submit_assessment(payload: AssessmentSubmit, db: Session = Depends(get_db), 
                 attempt_id=attempt.id,
                 question_id=q['question_id'],
                 user_answer=q['user_answer'],
-                is_correct=1 if q['is_correct'] else 0,
+                is_correct=(
+                    None if q['is_correct'] is None
+                    else 1 if q['is_correct'] else 0
+                ),
                 explanation=q['explanation'],
             ))
         db.commit()
@@ -424,6 +484,8 @@ def submit_assessment(payload: AssessmentSubmit, db: Session = Depends(get_db), 
         'score': score,
         'total': total,
         'percentage': percentage,
+        'question_count': len(questions),
+        'manual_review_count': manual_review_count,
         'attempt_id': attempt.id,
         'results': question_results,
     }
@@ -465,7 +527,8 @@ def get_assessment_attempt(
                 'question_text': questions[record.question_id].question_text
                 if record.question_id in questions else '',
                 'user_answer': record.user_answer or '',
-                'is_correct': bool(record.is_correct),
+                'is_correct': None if record.is_correct is None else bool(record.is_correct),
+                'needs_manual_review': record.is_correct is None,
                 'correct_answer': questions[record.question_id].correct_answer
                 if record.question_id in questions else '',
                 'explanation': record.explanation or '',
@@ -483,43 +546,188 @@ def performance(db: Session = Depends(get_db), user: User = Depends(get_current_
     if not attempts:
         return {'total_attempts': 0, 'average_score': 0, 'recent_results': [], 'suggested_revision': ['Upload a document and complete a quiz to see performance insights.']}
 
-    average_score = round(sum(a.percentage for a in attempts) / len(attempts), 1)
+    graded_attempts = [attempt for attempt in attempts if attempt.percentage is not None]
+    average_score = (
+        round(sum(a.percentage for a in graded_attempts) / len(graded_attempts), 1)
+        if graded_attempts else None
+    )
     recent = [serialize_attempt(a) for a in attempts[-5:]]
-    suggested = 'active recall' if average_score < 70 else 'concept application'
-    highest_score = max(attempt.percentage for attempt in attempts)
+    suggested = 'active recall' if average_score is not None and average_score < 70 else 'concept application'
+    highest_score = max((attempt.percentage for attempt in graded_attempts), default=None)
     topic_scores: dict[str, list[int]] = {}
-    for attempt in attempts:
+    for attempt in graded_attempts:
         quiz = db.query(Quiz).filter(Quiz.id == attempt.quiz_id).first()
         if quiz:
             topic_scores.setdefault(quiz.topic, []).append(attempt.percentage)
     return {
         'total_attempts': len(attempts),
         'average_score': average_score,
+        'auto_graded_attempts': len(graded_attempts),
         'highest_score': highest_score,
         'topic_scores': {
             topic: round(sum(scores) / len(scores), 1)
             for topic, scores in topic_scores.items()
         },
         'recent_results': recent,
-        'suggested_revision': [
-            f'Focus revision on {suggested} and revisit the topics linked to your most recent assessment attempts.'
-        ],
+        'suggested_revision': (
+            ['Assessment attempts contain responses awaiting manual review; no automatic score is available yet.']
+            if not graded_attempts else [
+                f'Focus revision on {suggested} and revisit the topics linked to your most recent assessment attempts.'
+            ]
+        ),
     }
 
 
-def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
-    words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size - 100):
-        chunk = ' '.join(words[i:i + chunk_size])
-        if chunk:
-            chunks.append(chunk)
-    return chunks or [text]
+@app.post('/api/research/ratings')
+def rate_research_question(
+    payload: QuestionRatingCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_dependency),
+):
+    question = db.query(Question).join(Quiz, Quiz.id == Question.quiz_id).filter(
+        Question.id == payload.question_id,
+        Quiz.owner_id == user.id,
+    ).first()
+    if not question:
+        raise HTTPException(status_code=404, detail='Question not found.')
+    rating = QuestionRating(
+        id=str(uuid.uuid4()),
+        question_id=question.id,
+        reviewer_id=user.id,
+        **payload.model_dump(exclude={'question_id'}),
+    )
+    db.add(rating)
+    db.commit()
+    return {'message': 'Research rating saved.', 'rating_id': rating.id}
+
+
+@app.get('/api/research/results')
+def research_results(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_dependency),
+):
+    runs = db.query(QuizGenerationRun).filter(
+        QuizGenerationRun.owner_id == user.id
+    ).order_by(QuizGenerationRun.quiz_id.asc()).all()
+    results = []
+    for run in runs:
+        quiz = db.query(Quiz).filter(
+            Quiz.id == run.quiz_id,
+            Quiz.owner_id == user.id,
+        ).first()
+        if not quiz:
+            continue
+        source_document = db.query(Document).filter(
+            Document.id == run.source_document_id,
+            Document.owner_id == user.id,
+        ).first() if run.source_document_id else None
+        questions = db.query(Question).filter(Question.quiz_id == quiz.id).all()
+        for question in questions:
+            ratings = db.query(QuestionRating).filter(
+                QuestionRating.question_id == question.id
+            ).all()
+            results.append({
+                'generation_condition': run.generation_condition,
+                'source_document_id': run.source_document_id,
+                'source_document': source_document.title if source_document else None,
+                'quiz_id': quiz.id,
+                'topic': quiz.topic,
+                'generation_time_ms': run.generation_time_ms,
+                'retrieved_context': run.retrieved_context,
+                'question': {
+                    'id': question.id,
+                    'text': question.question_text,
+                    'expected_answer': question.correct_answer,
+                    'type': question.question_type,
+                    'difficulty': question.difficulty,
+                },
+                'quality_review': serialize_question_with_review(db, question)['quality_review'],
+                'ratings': [
+                    {
+                        'relevance': rating.relevance,
+                        'source_alignment': rating.source_alignment,
+                        'answer_correctness': rating.answer_correctness,
+                        'answerability': rating.answerability,
+                        'clarity': rating.clarity,
+                        'grammar': rating.grammar,
+                        'educational_usefulness': rating.educational_usefulness,
+                        'comment': rating.comment,
+                    }
+                    for rating in ratings
+                ],
+            })
+    return results
+
+
+@app.get('/api/research/export.csv')
+def export_research_results(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_dependency),
+):
+    rows = research_results(db, user)
+    output = io.StringIO(newline='')
+    columns = [
+        'generation_condition',
+        'source_document_id',
+        'source_document',
+        'quiz_id',
+        'topic',
+        'generation_time_ms',
+        'question_id',
+        'question_text',
+        'expected_answer',
+        'retrieved_context',
+        'validation_status',
+        'source_support',
+        'source_overlap',
+        'semantic_similarity',
+        'reviewer_ratings',
+    ]
+    writer = csv.DictWriter(output, fieldnames=columns)
+    writer.writeheader()
+    for row in rows:
+        review = row['quality_review'] or {}
+        writer.writerow({
+            key: _csv_safe_cell(value)
+            for key, value in {
+                'generation_condition': row['generation_condition'],
+                'source_document_id': row['source_document_id'] or '',
+                'source_document': row['source_document'] or '',
+                'quiz_id': row['quiz_id'],
+                'topic': row['topic'],
+                'generation_time_ms': row['generation_time_ms'],
+                'question_id': row['question']['id'],
+                'question_text': row['question']['text'],
+                'expected_answer': row['question']['expected_answer'],
+                'retrieved_context': row['retrieved_context'],
+                'validation_status': review.get('status', ''),
+                'source_support': review.get('source_support', ''),
+                'source_overlap': review.get('source_overlap', ''),
+                'semantic_similarity': review.get('semantic_similarity', ''),
+                'reviewer_ratings': json.dumps(row['ratings']),
+            }.items()
+        })
+    return Response(
+        content=output.getvalue(),
+        media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="aqg-research-results.csv"'},
+    )
+
+
+def _csv_safe_cell(value: Any) -> str:
+    text = '' if value is None else str(value)
+    if text.lstrip(' \t\r\n').startswith(('=', '+', '-', '@')):
+        return f"'{text}"
+    return text
 
 
 MAX_GENERATION_CONTEXT_CHARS = 20000
 MAX_UPLOAD_BYTES = int(os.getenv('MAX_UPLOAD_BYTES', '10485760'))
 GENERATION_REQUESTS_PER_MINUTE = max(1, int(os.getenv('GENERATION_REQUESTS_PER_MINUTE', '5')))
+RETRIEVAL_TOP_K = max(1, int(os.getenv('RETRIEVAL_TOP_K', '4')))
+MIN_RETRIEVAL_SCORE = float(os.getenv('MIN_RETRIEVAL_SCORE', '0.25'))
+if not 0 <= MIN_RETRIEVAL_SCORE <= 1:
+    raise RuntimeError('MIN_RETRIEVAL_SCORE must be between 0 and 1.')
 _generation_requests: dict[str, deque[float]] = {}
 _generation_lock = threading.Lock()
 SUPPORTED_QUESTION_TYPES = {
@@ -560,14 +768,50 @@ def resolve_generation_source(
         ).order_by(DocumentChunk.chunk_index.asc()).all()
         if not chunks:
             chunks = [
-                DocumentChunk(content=text, source_page=1, chunk_index=index)
-                for index, text in enumerate(chunk_text(document.content))
+                DocumentChunk(
+                    id=str(uuid.uuid4()),
+                    document_id=document.id,
+                    content=chunk.text,
+                    source_page=chunk.page_number,
+                    chunk_index=index,
+                )
+                for index, chunk in enumerate(
+                    split_pages([ExtractedPage(page_number=1, text=document.content)])
+                )
             ]
-        matches = retrieve_relevant_chunks(
-            query + ' ' + (source_text or ''),
-            ((chunk.content, chunk.source_page or 1) for chunk in chunks),
-            limit=4,
-        )
+            db.add_all(chunks)
+            db.flush()
+
+        retrieval_query = query + ' ' + (source_text or '')
+        embedding_provider = get_embedding_provider()
+        if embedding_provider:
+            if any(
+                not chunk.embedding or chunk.embedding_model != embedding_provider.model
+                for chunk in chunks
+            ):
+                vectors = embedding_provider.embed_texts([chunk.content for chunk in chunks])
+                for chunk, vector in zip(chunks, vectors):
+                    chunk.embedding = vector
+                    chunk.embedding_model = embedding_provider.model
+                db.commit()
+            query_embedding = embedding_provider.embed_texts([retrieval_query])[0]
+            embedded_matches = retrieve_embedded_chunks(
+                query_embedding,
+                (
+                    (chunk.content, chunk.source_page or 1, chunk.embedding)
+                    for chunk in chunks
+                ),
+                limit=RETRIEVAL_TOP_K,
+                min_score=MIN_RETRIEVAL_SCORE,
+            )
+            matches = [(text, page) for text, page, _ in embedded_matches]
+        else:
+            matches = retrieve_relevant_chunks(
+                retrieval_query,
+                ((chunk.content, chunk.source_page or 1) for chunk in chunks),
+                limit=RETRIEVAL_TOP_K,
+                min_score=MIN_RETRIEVAL_SCORE,
+            )
         if not matches:
             raise HTTPException(status_code=422, detail='No relevant text could be retrieved from this document.')
         retrieved_text = '\n\n'.join(
@@ -580,6 +824,29 @@ def resolve_generation_source(
     return (source_text or '').strip()[:MAX_GENERATION_CONTEXT_CHARS], (
         'Provided source text' if source_text and source_text.strip() else None
     )
+
+
+def embed_chunks(texts: list[str]) -> tuple[list[list[float] | None], str | None]:
+    provider = get_embedding_provider()
+    if not provider:
+        return [None] * len(texts), None
+    embeddings = provider.embed_texts(texts)
+    dimensions = {len(vector) for vector in embeddings}
+    if (
+        len(embeddings) != len(texts)
+        or len(dimensions) != 1
+        or not dimensions.pop()
+        or any(
+            not isinstance(value, (int, float)) or not math.isfinite(value)
+            for vector in embeddings
+            for value in vector
+        )
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail='The embedding provider returned incomplete or invalid vectors.',
+        )
+    return embeddings, provider.model
 
 
 def enforce_generation_rate_limit(user_id: str) -> None:
@@ -780,7 +1047,32 @@ def _generate_question_set_once(
             'correct_answer': answer.strip(),
             'explanation': explanation.strip(),
         })
-    return validated
+    try:
+        semantic_similarities = None
+        embedding_provider = get_embedding_provider() if source_text else None
+        if embedding_provider:
+            vectors = embedding_provider.embed_texts([
+                source_text,
+                *[
+                    f"{question['question_text']} Expected answer: {question['correct_answer']}"
+                    for question in validated
+                ],
+            ])
+            source_embedding = vectors[0]
+            semantic_similarities = [
+                cosine_similarity(source_embedding, vector) or 0.0
+                for vector in vectors[1:]
+            ]
+        return validate_question_batch(
+            validated,
+            source_text,
+            semantic_similarities=semantic_similarities,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail='OpenAI returned a question set that failed quality checks. Please try again.',
+        ) from exc
 
 
 def generate_study_content(kind: str, topic: str, source_text: str) -> Dict[str, Any]:
@@ -940,7 +1232,10 @@ def serialize_quiz(quiz: Quiz) -> Dict[str, Any]:
     }
 
 
-def serialize_question(question: Question) -> Dict[str, Any]:
+def serialize_question(
+    question: Question,
+    quality_review: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     return {
         'id': question.id,
         'question_text': question.question_text,
@@ -950,7 +1245,25 @@ def serialize_question(question: Question) -> Dict[str, Any]:
         'explanation': question.explanation,
         'source_reference': question.source_reference,
         'marks': question.marks,
+        'quality_review': quality_review,
     }
+
+
+def serialize_question_with_review(db: Session, question: Question) -> Dict[str, Any]:
+    review = db.query(QuestionQualityReview).filter(
+        QuestionQualityReview.question_id == question.id
+    ).first()
+    quality_review = None
+    if review:
+        quality_review = {
+            'status': review.status,
+            'duplicate_of_question': review.duplicate_of_question,
+            'source_support': review.source_support,
+            'source_overlap': review.source_overlap,
+            'semantic_similarity': review.semantic_similarity,
+            'review_note': review.review_note,
+        }
+    return serialize_question(question, quality_review)
 
 
 def serialize_study_resource(resource: StudyResource) -> Dict[str, Any]:
@@ -974,7 +1287,9 @@ def serialize_attempt(attempt: AssessmentAttempt) -> Dict[str, Any]:
     }
 
 
-def grade_answer(question: Question, user_answer: str) -> bool:
+def grade_answer(question: Question, user_answer: str) -> bool | None:
+    if question.question_type in {'essay', 'scenario_based', 'case_study', 'application'}:
+        return None
     expected = _normalize_answer(question.correct_answer or '')
     provided = _normalize_answer(user_answer or '')
     if not provided:

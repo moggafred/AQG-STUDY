@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r backend/requirements.txt
-    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    startCommand: cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -21,3 +21,11 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4o-mini
+      - key: EMBEDDING_PROVIDER
+        value: auto
+      - key: EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: RETRIEVAL_TOP_K
+        value: 4
+      - key: MIN_RETRIEVAL_SCORE
+        value: 0.25

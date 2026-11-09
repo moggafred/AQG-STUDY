@@ -14,16 +14,20 @@ from sqlalchemy.orm import sessionmaker
 from app.main import app, request_openai_json
 from app.database import Base, get_db
 from app.document_pipeline import (
+    retrieve_embedded_chunks,
     DocumentProcessingError,
     ExtractedPage,
     extract_pdf_pages,
     retrieve_relevant_chunks,
     split_pages,
 )
+from app.embeddings import get_embedding_provider
 from app.main import enforce_generation_rate_limit, generate_question_set, grade_answer
+from app.question_validation import validate_question_batch
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
+    monkeypatch.setenv('EMBEDDING_PROVIDER', 'tfidf')
     test_engine = create_engine(
         f'sqlite:///{tmp_path / "aqg-test.db"}',
         connect_args={'check_same_thread': False},
@@ -38,7 +42,6 @@ def client(tmp_path, monkeypatch):
         finally:
             db.close()
 
-    monkeypatch.setattr('app.main.engine', test_engine)
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as test_client:
         yield test_client
@@ -261,6 +264,120 @@ def test_pdf_extraction_chunks_and_retrieval():
     assert retrieved[0][1] == 1
 
 
+def test_retrieval_does_not_return_unrelated_chunks():
+    chunks = [('Cellular respiration releases energy.', 1)]
+    assert retrieve_relevant_chunks('', chunks) == []
+    assert retrieve_relevant_chunks('quantum mechanics', chunks) == []
+    assert retrieve_relevant_chunks('cellular respiration', chunks, min_score=1.0) == []
+    with pytest.raises(ValueError, match='between 0 and 1'):
+        retrieve_relevant_chunks('cellular respiration', chunks, min_score=1.1)
+
+
+def test_embedded_retrieval_ranks_by_cosine_and_filters_invalid_vectors():
+    chunks = [
+        ('semantic match', 1, [1.0, 0.0]),
+        ('weaker match', 2, [0.7, 0.7]),
+        ('different direction', 3, [0.0, 1.0]),
+        ('dimension mismatch', 4, [1.0]),
+        ('missing vector', 5, None),
+    ]
+    results = retrieve_embedded_chunks([1.0, 0.0], chunks, limit=2, min_score=0.5)
+    assert results[0][:2] == ('semantic match', 1)
+    assert results[0][2] == pytest.approx(1.0)
+    assert results[1][0] == 'weaker match'
+    assert retrieve_embedded_chunks([0.0, 0.0], chunks) == []
+
+
+def test_auto_embedding_provider_falls_back_without_configured_key(monkeypatch):
+    monkeypatch.setenv('EMBEDDING_PROVIDER', 'auto')
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.delenv('EMBEDDING_API_KEY', raising=False)
+    assert get_embedding_provider() is None
+
+
+def test_upload_embeds_chunks_and_rag_generation_uses_semantic_retrieval(client, monkeypatch):
+    class FakeEmbeddingProvider:
+        model = 'test-embedding-model'
+
+        def __init__(self):
+            self.inputs = []
+
+        def embed_texts(self, texts):
+            self.inputs.append(texts)
+            return [[1.0, 0.0] for _ in texts]
+
+    provider = FakeEmbeddingProvider()
+    monkeypatch.setattr('app.main.get_embedding_provider', lambda: provider)
+    monkeypatch.setattr('app.main.request_openai_json', lambda instructions, input_text: {
+        'questions': [{
+            'question_text': 'What process uses light energy?',
+            'question_type': 'multiple_choice',
+            'difficulty': 'intermediate',
+            'options': ['Photosynthesis', 'Respiration'],
+            'correct_answer': 'Photosynthesis',
+            'explanation': 'The source discusses photosynthesis.',
+        }]
+    })
+    token = client.post('/api/auth/register', json={
+        'full_name': 'Embedding Learner',
+        'email': unique_email('embedding'),
+        'password': 'password123',
+    }).json()['access_token']
+    headers = {'Authorization': f'Bearer {token}'}
+
+    upload = client.post(
+        '/api/documents/upload',
+        json={
+            'title': 'Plant Biology',
+            'content': 'Photosynthesis converts light energy into chemical energy in plants.',
+        },
+        headers=headers,
+    )
+    assert upload.status_code == 200, upload.text
+    assert provider.inputs[0] == [
+        'Photosynthesis converts light energy into chemical energy in plants.'
+    ]
+
+    generated = client.post(
+        '/api/quizzes/generate',
+        json={'topic': 'photosynthesis', 'document_id': upload.json()['document']['id'], 'count': 1},
+        headers=headers,
+    )
+    assert generated.status_code == 200, generated.text
+    question = generated.json()['questions'][0]
+    assert question['quality_review']['source_support'] == 'semantic_similarity_screen'
+    assert question['quality_review']['semantic_similarity'] == 1.0
+    assert any('photosynthesis' in texts[0].casefold() for texts in provider.inputs[1:])
+
+
+def test_question_quality_flags_duplicates_and_keeps_source_check_honest():
+    questions = [
+        {
+            'question_text': 'Which process converts light into energy?',
+            'question_type': 'short_answer',
+            'difficulty': 'easy',
+            'options': None,
+            'correct_answer': 'Photosynthesis',
+            'explanation': 'Plants use photosynthesis to convert light energy.',
+        },
+        {
+            'question_text': 'Which process converts light into energy?',
+            'question_type': 'short_answer',
+            'difficulty': 'easy',
+            'options': None,
+            'correct_answer': 'Photosynthesis',
+            'explanation': 'Plants use photosynthesis to convert light energy.',
+        },
+    ]
+    results = validate_question_batch(questions, 'Photosynthesis converts light energy into chemical energy.')
+    assert results[0]['quality_review']['status'] == 'needs_review'
+    assert results[0]['quality_review']['source_support'] == 'lexical_overlap_found'
+    assert results[1]['quality_review']['status'] == 'regeneration_required'
+    assert results[1]['quality_review']['duplicate_of_question'] == 1
+    no_source = validate_question_batch(questions[:1], '')[0]['quality_review']
+    assert no_source['source_support'] == 'not_assessed'
+
+
 def test_pdf_extraction_rejects_invalid_and_scanned_files():
     import fitz
 
@@ -364,6 +481,129 @@ def test_short_answers_require_normalized_exact_match():
     assert grade_answer(question, ' photosynthesis ')
     assert not grade_answer(question, 'photosynthesis is a process')
     assert not grade_answer(question, '')
+    essay = SimpleNamespace(question_type='essay', correct_answer='A detailed marking guide.')
+    assert grade_answer(essay, 'A response that cannot be safely scored by exact matching.') is None
+
+
+def test_subjective_assessment_is_saved_for_manual_review(client, monkeypatch):
+    monkeypatch.setattr('app.main.request_openai_json', lambda instructions, input_text: {
+        'questions': [{
+            'question_text': 'Explain why biodiversity is important.',
+            'question_type': 'essay',
+            'difficulty': 'intermediate',
+            'options': None,
+            'correct_answer': 'Award marks for ecological stability and resilience.',
+            'explanation': 'This essay requires human judgment against the marking guidance.',
+        }]
+    })
+    token = client.post('/api/auth/register', json={
+        'full_name': 'Essay Learner',
+        'email': unique_email('essay'),
+        'password': 'password123',
+    }).json()['access_token']
+    headers = {'Authorization': f'Bearer {token}'}
+    quiz_response = client.post(
+        '/api/quizzes/generate',
+        json={'topic': 'Biodiversity', 'question_type': 'essay', 'count': 1},
+        headers=headers,
+    )
+    assert quiz_response.status_code == 200, quiz_response.text
+    question = quiz_response.json()['questions'][0]
+    assessment = client.post(
+        '/api/assessments/submit',
+        json={
+            'quiz_id': quiz_response.json()['quiz']['id'],
+            'answers': [{'question_id': question['id'], 'answer': 'My essay response.'}],
+        },
+        headers=headers,
+    )
+    assert assessment.status_code == 200
+    result = assessment.json()
+    assert result['percentage'] is None
+    assert result['manual_review_count'] == 1
+    assert result['results'][0]['is_correct'] is None
+    assert result['results'][0]['needs_manual_review'] is True
+    attempt = client.get(
+        f"/api/assessments/{result['attempt_id']}",
+        headers=headers,
+    ).json()
+    assert attempt['results'][0]['is_correct'] is None
+
+
+def test_research_export_and_ratings_are_owner_scoped(client, monkeypatch):
+    monkeypatch.setattr('app.main.request_openai_json', lambda instructions, input_text: {
+        'questions': [{
+            'question_text': 'What does photosynthesis convert?',
+            'question_type': 'multiple_choice',
+            'difficulty': 'intermediate',
+            'options': ['Light energy', 'Sound energy'],
+            'correct_answer': 'Light energy',
+            'explanation': 'Photosynthesis converts light energy.',
+        }]
+    })
+    token = client.post('/api/auth/register', json={
+        'full_name': 'Research Learner',
+        'email': unique_email('research'),
+        'password': 'password123',
+    }).json()['access_token']
+    headers = {'Authorization': f'Bearer {token}'}
+    document = client.post(
+        '/api/documents/upload',
+        json={
+            'title': 'Photosynthesis',
+            'content': 'Photosynthesis converts light energy into chemical energy in plants.',
+        },
+        headers=headers,
+    ).json()['document']
+    generated = client.post(
+        '/api/quizzes/generate',
+        json={'topic': 'photosynthesis', 'document_id': document['id'], 'count': 1},
+        headers=headers,
+    )
+    assert generated.status_code == 200, generated.text
+    question = generated.json()['questions'][0]
+    assert question['quality_review']['status'] == 'needs_review'
+
+    rating = client.post(
+        '/api/research/ratings',
+        json={
+            'question_id': question['id'],
+            'relevance': 4,
+            'source_alignment': 5,
+            'answer_correctness': 4,
+            'answerability': 5,
+            'clarity': 4,
+            'grammar': 5,
+            'educational_usefulness': 4,
+            'comment': 'Clear and supported.',
+        },
+        headers=headers,
+    )
+    assert rating.status_code == 200
+    rows = client.get('/api/research/results', headers=headers).json()
+    assert rows[0]['generation_condition'] == 'rag'
+    assert rows[0]['source_document_id'] == document['id']
+    assert rows[0]['ratings'][0]['source_alignment'] == 5
+    export = client.get('/api/research/export.csv', headers=headers)
+    assert export.status_code == 200
+    assert 'retrieved_context' in export.text
+    assert 'Photosynthesis converts light energy' in export.text
+
+    other_token = client.post('/api/auth/register', json={
+        'full_name': 'Other Learner',
+        'email': unique_email('research-other'),
+        'password': 'password123',
+    }).json()['access_token']
+    other_headers = {'Authorization': f'Bearer {other_token}'}
+    assert client.get('/api/research/results', headers=other_headers).json() == []
+    denied = client.post(
+        '/api/research/ratings',
+        json={'question_id': question['id'], 'relevance': 5, 'source_alignment': 5,
+              'answer_correctness': 5, 'answerability': 5, 'clarity': 5, 'grammar': 5,
+              'educational_usefulness': 5},
+        headers=other_headers,
+    )
+    assert denied.status_code == 404
 
 
 def test_generation_rate_limit_is_bounded_per_user():

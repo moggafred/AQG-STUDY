@@ -62,6 +62,18 @@ class AssessmentSubmit(BaseModel):
     answers: List[AssessmentAnswer]
 
 
+class QuestionRatingCreate(BaseModel):
+    question_id: str
+    relevance: int = Field(ge=1, le=5)
+    source_alignment: int = Field(ge=1, le=5)
+    answer_correctness: int = Field(ge=1, le=5)
+    answerability: int = Field(ge=1, le=5)
+    clarity: int = Field(ge=1, le=5)
+    grammar: int = Field(ge=1, le=5)
+    educational_usefulness: int = Field(ge=1, le=5)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
 class StudyGenerate(BaseModel):
     kind: Literal['summary', 'flashcards', 'concepts', 'revision_notes', 'definitions']
     topic: str = Field(..., min_length=2, max_length=200)

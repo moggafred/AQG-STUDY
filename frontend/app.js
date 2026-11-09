@@ -125,20 +125,30 @@ function dashboardPage() {
     <main class="container dashboard" id="workspace">
       <div id="message" class="status-message" role="status">${escapeHtml(state.message)}</div>
       <section class="welcome-row"><div><span class="kicker">YOUR STUDY SPACE</span><h1>Good to see you, ${escapeHtml(state.user?.full_name?.split(' ')[0] || 'learner')}.</h1><p>What would you like to work on today?</p></div><span class="user-chip">${escapeHtml(state.user?.email || '')}</span></section>
-      <section class="metric-grid" aria-label="Study overview"><div class="metric-card"><span>Study materials</span><strong>${state.documents.length}</strong><small>Saved to your space</small></div><div class="metric-card"><span>Practice sets</span><strong>${state.quizzes.length}</strong><small>Ready when you are</small></div><div class="metric-card"><span>Assessment attempts</span><strong>${state.performance?.total_attempts || 0}</strong><small>Saved attempts</small></div><div class="metric-card"><span>Average score</span><strong>${avg === undefined ? '—' : `${avg}%`}</strong><small>${avg === undefined ? 'Complete an assessment to see this' : 'Across your saved attempts'}</small></div></section>
+      <section class="metric-grid" aria-label="Study overview"><div class="metric-card"><span>Study materials</span><strong>${state.documents.length}</strong><small>Saved to your space</small></div><div class="metric-card"><span>Practice sets</span><strong>${state.quizzes.length}</strong><small>Ready when you are</small></div><div class="metric-card"><span>Assessment attempts</span><strong>${state.performance?.total_attempts || 0}</strong><small>Saved attempts</small></div><div class="metric-card"><span>Average score</span><strong>${avg == null ? '—' : `${avg}%`}</strong><small>${avg == null ? 'Complete an auto-graded assessment to see this' : 'Across auto-graded attempts'}</small></div></section>
       <div class="dashboard-grid">
         <section class="workspace-card" id="documents"><div class="card-heading"><div><span class="kicker">YOUR LIBRARY</span><h2>Study materials</h2></div><span class="card-symbol icon-blue">▤</span></div><p>Add study text to create a saved document for your workspace.</p><form id="upload-form"><label class="field">Title<input name="title" required minlength="2" value="My study notes"></label><label class="field">Study text<textarea name="content" rows="4" required minlength="20" placeholder="Paste text from your notes here"></textarea></label><button class="button button-primary" type="submit">Save material <span>→</span></button></form><div class="saved-list">${state.documents.length ? state.documents.map(doc => `<div class="saved-item"><span class="saved-icon">▤</span><span><b>${escapeHtml(doc.title)}</b><small>${escapeHtml(doc.status)} · ${new Date(doc.created_at).toLocaleDateString()}</small></span></div>`).join('') : '<p class="empty-state">Your library is empty. Add your first notes above.</p>'}</div></section>
-        <section class="workspace-card" id="practice"><div class="card-heading"><div><span class="kicker">ACTIVE RECALL</span><h2>Build a practice set</h2></div><span class="card-symbol icon-yellow">✳</span></div><p>Choose a topic and start a short practice session.</p><form id="quiz-form"><label class="field">Topic<input name="topic" required minlength="2" value="Machine learning"></label><label class="field">Study document<select name="document_id"><option value="">None — use general knowledge</option>${documentOptions}</select></label><div class="form-columns"><label class="field">Question style<select name="question_type"><option value="multiple_choice">Multiple choice</option><option value="true_false">True or false</option><option value="short_answer">Short answer</option></select></label><label class="field">Difficulty<select name="difficulty"><option value="easy">Easy</option><option value="intermediate" selected>Intermediate</option><option value="hard">Hard</option></select></label></div><label class="field">Number of questions<input name="count" type="number" min="1" max="8" value="3" required></label><button class="button button-primary" type="submit">Generate practice <span>→</span></button></form>
+        <section class="workspace-card" id="practice"><div class="card-heading"><div><span class="kicker">ACTIVE RECALL</span><h2>Build a practice set</h2></div><span class="card-symbol icon-yellow">✳</span></div><p>Choose a topic and start a short practice session.</p><form id="quiz-form"><label class="field">Topic<input name="topic" required minlength="2" value="Machine learning"></label><label class="field">Study document<select name="document_id"><option value="">None — use general knowledge</option>${documentOptions}</select></label><div class="form-columns"><label class="field">Question style<select name="question_type"><option value="multiple_choice">Multiple choice</option><option value="true_false">True or false</option><option value="short_answer">Short answer</option><option value="essay">Essay</option><option value="scenario_based">Scenario based</option><option value="case_study">Case study</option><option value="application">Application</option><option value="mixed">Mixed</option></select></label><label class="field">Difficulty<select name="difficulty"><option value="easy">Easy</option><option value="intermediate" selected>Medium</option><option value="hard">Difficult</option></select></label></div><label class="field">Number of questions<input name="count" type="number" min="1" max="8" value="3" required></label><button class="button button-primary" type="submit">Generate practice <span>→</span></button></form>
         <div id="quiz-area">${renderActiveQuiz()}</div></section>
       </div>
-      <div class="dashboard-grid lower-grid"><section class="workspace-card" id="progress"><div class="card-heading"><div><span class="kicker">YOUR PROGRESS</span><h2>Assessment history</h2></div><span class="card-symbol icon-lilac">◎</span></div>${state.performance?.recent_results?.length ? state.performance.recent_results.map(attempt => `<div class="saved-item"><span class="result-score">${attempt.percentage}%</span><span><b>${attempt.score} of ${attempt.total} correct</b><small>${new Date(attempt.submitted_at).toLocaleString()}</small></span></div>`).join('') : '<p class="empty-state">No completed assessments yet. Finish a practice set to see your results here.</p>'}</section>
+      <div class="dashboard-grid lower-grid"><section class="workspace-card" id="progress"><div class="card-heading"><div><span class="kicker">YOUR PROGRESS</span><h2>Assessment history</h2></div><span class="card-symbol icon-lilac">◎</span></div>${state.performance?.recent_results?.length ? state.performance.recent_results.map(attempt => `<div class="saved-item"><span class="result-score">${attempt.percentage == null ? 'Review' : `${attempt.percentage}%`}</span><span><b>${attempt.percentage == null ? 'Manual review required' : `${attempt.score} of ${attempt.total} auto-graded correct`}</b><small>${new Date(attempt.submitted_at).toLocaleString()}</small></span></div>`).join('') : '<p class="empty-state">No completed assessments yet. Finish a practice set to see your results here.</p>'}</section>
       <section class="workspace-card"><div class="card-heading"><div><span class="kicker">STUDY TOOLS</span><h2>Make a study resource</h2></div><span class="card-symbol icon-lilac">✎</span></div><form id="resource-form"><label class="field">Topic<input name="topic" required value="Machine learning"></label><label class="field">Resource<select name="kind"><option value="summary">Summary</option><option value="flashcards">Flashcards</option><option value="concepts">Key concepts</option><option value="revision_notes">Revision notes</option><option value="definitions">Definitions</option></select></label><label class="field">Saved study document<select name="document_id"><option value="">None</option>${documentOptions}</select></label><label class="field">Or source text<textarea name="source_text" rows="3" placeholder="Paste optional source text"></textarea></label><button class="button button-primary" type="submit">Create resource <span>→</span></button></form><div class="saved-list">${state.resources.slice(0, 3).map(item => `<div class="saved-item"><span class="saved-icon">✎</span><span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.kind)}</small></span></div>`).join('')}</div></section></div>
+      <section class="workspace-card research-panel" id="research"><div class="card-heading"><div><span class="kicker">RESEARCH SUPPORT</span><h2>Question quality study</h2></div></div><p>Export generation condition, retrieved context, screening results and human ratings for your own quizzes.</p><button class="button button-outline" type="button" data-action="export-research">Download research CSV</button></section>
     </main><footer><div class="container footer-inner"><a class="brand" href="#home"><span class="brand-mark">A</span> AQG</a><span>Your study space, at your pace.</span><a href="mailto:help@aqg.local">Help &amp; support</a></div></footer>`;
 }
 
 function renderActiveQuiz() {
   if (!state.activeQuiz) return '';
-  return `<div class="active-quiz"><div class="quiz-title"><span class="kicker">PRACTICE SET</span><h3>${escapeHtml(state.activeQuiz.quiz.title)}</h3></div><form id="assessment-form">${state.activeQuiz.questions.map((q, index) => `<fieldset class="question"><legend><b>${index + 1}.</b> ${escapeHtml(q.question_text)}</legend>${q.options?.length ? q.options.map((option, i) => `<label class="option"><input type="radio" name="${escapeHtml(q.id)}" value="${escapeHtml(option)}"><span>${escapeHtml(option)}</span></label>`).join('') : `<label class="field">Your answer<textarea name="${escapeHtml(q.id)}" rows="3"></textarea></label>`}</fieldset>`).join('')}<button class="button button-primary" type="submit">Submit answers</button></form></div>`;
+  const ratingFields = [
+    ['relevance', 'Relevance'],
+    ['source_alignment', 'Source alignment'],
+    ['answer_correctness', 'Answer correctness'],
+    ['answerability', 'Answerability'],
+    ['clarity', 'Clarity'],
+    ['grammar', 'Grammar'],
+    ['educational_usefulness', 'Educational usefulness'],
+  ];
+  return `<div class="active-quiz"><div class="quiz-title"><span class="kicker">PRACTICE SET</span><h3>${escapeHtml(state.activeQuiz.quiz.title)}</h3></div><form id="assessment-form">${state.activeQuiz.questions.map((q, index) => `<fieldset class="question"><legend><b>${index + 1}.</b> ${escapeHtml(q.question_text)}</legend>${q.quality_review ? `<p class="quality-review"><b>${escapeHtml(q.quality_review.status.replaceAll('_', ' '))}:</b> ${escapeHtml(q.quality_review.review_note)}</p>` : ''}${q.options?.length ? q.options.map((option) => `<label class="option"><input type="radio" name="${escapeHtml(q.id)}" value="${escapeHtml(option)}"><span>${escapeHtml(option)}</span></label>`).join('') : `<label class="field">Your answer<textarea name="${escapeHtml(q.id)}" rows="3"></textarea></label>`}</fieldset>`).join('')}<label class="option review-confirmation"><input type="checkbox" name="review_confirmed" required><span>I have reviewed the questions and source-screening notes before starting this assessment.</span></label><button class="button button-primary" type="submit">Submit answers</button></form>${state.activeQuiz.questions.map((q, index) => `<details class="research-rating"><summary>Rate question ${index + 1} for research</summary><form class="research-rating-form" data-question-id="${escapeHtml(q.id)}">${ratingFields.map(([name, label]) => `<label class="field">${label}<select name="${name}" required><option value="">Choose 1–5</option>${[1, 2, 3, 4, 5].map(value => `<option value="${value}">${value}</option>`).join('')}</select></label>`).join('')}<label class="field">Comment (optional)<textarea name="comment" rows="2" maxlength="2000"></textarea></label><button class="button button-outline" type="submit">Save research rating</button></form></details>`).join('')}</div>`;
 }
 
 function enhanceDashboard() {
@@ -218,7 +228,7 @@ function enhanceDashboard() {
   });
 
   const metricGrid = document.querySelector('.metric-grid');
-  if (metricGrid && state.performance?.highest_score !== undefined && !metricGrid.querySelector('.highest-score')) {
+  if (metricGrid && state.performance?.highest_score != null && !metricGrid.querySelector('.highest-score')) {
     const metric = document.createElement('div');
     metric.className = 'metric-card highest-score';
     metric.innerHTML = `<span>Highest score</span><strong>${escapeHtml(state.performance.highest_score)}%</strong><small>From saved assessments</small>`;
@@ -229,7 +239,7 @@ function enhanceDashboard() {
   if (navigation && !navigation.querySelector('[href="#history"]')) {
     navigation.insertAdjacentHTML(
       'beforeend',
-      '<a href="#history">Quiz history</a><a href="#study-history">Study resources</a>',
+      '<a href="#history">Quiz history</a><a href="#study-history">Study resources</a><a href="#research">Research</a>',
     );
   }
 
@@ -253,8 +263,8 @@ function enhanceDashboard() {
       <h3>Assessment attempts</h3>
       ${state.history.length ? state.history.map(attempt => `
         <div class="saved-item">
-          <span class="result-score">${attempt.percentage}%</span>
-          <span><b>${attempt.score} of ${attempt.total} correct</b><small>${new Date(attempt.submitted_at).toLocaleString()}</small></span>
+          <span class="result-score">${attempt.percentage == null ? 'Review' : `${attempt.percentage}%`}</span>
+          <span><b>${attempt.percentage == null ? 'Manual review required' : `${attempt.score} of ${attempt.total} auto-graded correct`}</b><small>${new Date(attempt.submitted_at).toLocaleString()}</small></span>
           <button class="text-action" type="button" data-action="open-attempt" data-attempt-id="${escapeHtml(attempt.id)}">Review</button>
         </div>`).join('') : '<p class="empty-state">Completed assessments will appear here.</p>'}
       <div class="card-heading history-subheading" id="study-history"><div><span class="kicker">SAVED RESOURCES</span><h2>Study resources</h2></div></div>
@@ -323,11 +333,12 @@ function renderResourceDetails() {
 
 function renderAssessmentResult(result) {
   return `<article class="result-review" role="status">
-    <h3>Assessment result: ${result.score} / ${result.total} (${result.percentage}%)</h3>
+    <h3>${result.percentage == null ? 'Assessment submitted — manual review required' : `Assessment result: ${result.score} / ${result.total} auto-graded (${result.percentage}%)`}</h3>
+    ${result.manual_review_count ? `<p>${result.manual_review_count} response${result.manual_review_count === 1 ? '' : 's'} need human marking.</p>` : ''}
     ${result.results.map((item, index) => `<div class="answer-review">
       <b>${index + 1}. ${escapeHtml(item.question_text)}</b>
-      <p class="${item.is_correct ? 'answer-correct' : 'answer-incorrect'}">${item.is_correct ? 'Correct' : 'Incorrect'} · Your answer: ${escapeHtml(item.user_answer || 'Not answered')}</p>
-      ${item.is_correct ? '' : `<p>Expected answer: ${escapeHtml(item.correct_answer)}</p>`}
+      <p class="${item.needs_manual_review ? '' : item.is_correct ? 'answer-correct' : 'answer-incorrect'}">${item.needs_manual_review ? 'Submitted for manual review' : item.is_correct ? 'Correct' : 'Incorrect'} · Your answer: ${escapeHtml(item.user_answer || 'Not answered')}</p>
+      ${item.is_correct === false || item.needs_manual_review ? `<p>Expected answer / marking guidance: ${escapeHtml(item.correct_answer)}</p>` : ''}
       <p>${escapeHtml(item.explanation || '')}</p>
     </div>`).join('')}
     <button class="text-action" type="button" data-action="clear-result">Close review</button>
@@ -336,11 +347,11 @@ function renderAssessmentResult(result) {
 
 function renderAttemptResult(result) {
   return `<article class="result-review"><h3>${escapeHtml(result.quiz?.title || 'Assessment review')}</h3>
-    <p>Score: ${result.attempt.percentage}% (${result.attempt.score} / ${result.attempt.total})</p>
+    <p>${result.attempt.percentage == null ? 'This attempt contains answers that need manual review.' : `Score: ${result.attempt.percentage}% (${result.attempt.score} / ${result.attempt.total} auto-graded)`}</p>
     ${result.results.map((item, index) => `<div class="answer-review">
       <b>${index + 1}. ${escapeHtml(item.question_text)}</b>
-      <p class="${item.is_correct ? 'answer-correct' : 'answer-incorrect'}">${item.is_correct ? 'Correct' : 'Incorrect'} · Your answer: ${escapeHtml(item.user_answer || 'Not answered')}</p>
-      ${item.is_correct ? '' : `<p>Expected answer: ${escapeHtml(item.correct_answer)}</p>`}
+      <p class="${item.needs_manual_review ? '' : item.is_correct ? 'answer-correct' : 'answer-incorrect'}">${item.needs_manual_review ? 'Submitted for manual review' : item.is_correct ? 'Correct' : 'Incorrect'} · Your answer: ${escapeHtml(item.user_answer || 'Not answered')}</p>
+      ${item.is_correct === false || item.needs_manual_review ? `<p>Expected answer / marking guidance: ${escapeHtml(item.correct_answer)}</p>` : ''}
       <p>${escapeHtml(item.explanation)}</p>
     </div>`).join('')}
     <button class="text-action" type="button" data-action="clear-result">Close review</button>
@@ -445,6 +456,25 @@ app.addEventListener('click', async (event) => {
     state.attemptResult = null;
     state.activeResourceId = null;
     render();
+  } else if (action === 'export-research') {
+    try {
+      const response = await fetch(`${API_BASE}/api/research/export.csv`, {
+        headers: state.token ? { Authorization: `Bearer ${state.token}` } : {},
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || `Request failed (${response.status})`);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const download = document.createElement('a');
+      download.href = url;
+      download.download = 'aqg-research-results.csv';
+      download.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMessage('Research results exported.');
+    } catch (error) {
+      setMessage(error.message || 'Could not export research results.');
+    }
   } else if (action === 'logout') {
     localStorage.removeItem('aqg_token');
     state.token = null;
@@ -477,7 +507,27 @@ app.addEventListener('submit', async (event) => {
   const form = event.target;
   const data = Object.fromEntries(new FormData(form).entries());
   try {
-    if (form.id === 'auth-form') {
+    if (form.matches('.research-rating-form')) {
+      const dimensions = [
+        'relevance',
+        'source_alignment',
+        'answer_correctness',
+        'answerability',
+        'clarity',
+        'grammar',
+        'educational_usefulness',
+      ];
+      await request('/api/research/ratings', {
+        method: 'POST',
+        body: JSON.stringify({
+          question_id: form.dataset.questionId,
+          ...Object.fromEntries(dimensions.map(name => [name, Number(data[name])])),
+          comment: data.comment || null,
+        }),
+      });
+      form.reset();
+      setMessage('Your research rating was saved.');
+    } else if (form.id === 'auth-form') {
       const registering = state.authMode === 'register';
       const result = await request(registering ? '/api/auth/register' : '/api/auth/login', {
         method: 'POST',

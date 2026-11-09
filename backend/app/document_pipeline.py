@@ -61,7 +61,10 @@ def retrieve_relevant_chunks(
     query: str,
     chunks: Iterable[tuple[str, int]],
     limit: int = 4,
+    min_score: float = 0.0,
 ) -> list[tuple[str, int]]:
+    if not 0 <= min_score <= 1:
+        raise ValueError('The minimum retrieval score must be between 0 and 1.')
     documents = list(chunks)
     if not documents or limit <= 0:
         return []
@@ -69,7 +72,7 @@ def retrieve_relevant_chunks(
     tokenized = [_tokenize(text) for text, _ in documents]
     query_tokens = _tokenize(query)
     if not query_tokens:
-        return documents[:limit]
+        return []
 
     document_frequency = Counter(
         token
@@ -93,13 +96,48 @@ def retrieve_relevant_chunks(
     for index, tokens in enumerate(tokenized):
         vector = vectorize(tokens)
         score = sum(weight * vector.get(token, 0.0) for token, weight in query_vector.items())
-        if score > 0:
+        if score >= min_score and score > 0:
             ranked.append((score, index))
 
     if not ranked:
-        return documents[:limit]
+        return []
     ranked.sort(key=lambda result: result[0], reverse=True)
     return [documents[index] for _, index in ranked[:limit]]
+
+
+def retrieve_embedded_chunks(
+    query_embedding: list[float],
+    chunks: Iterable[tuple[str, int, list[float] | None]],
+    limit: int = 4,
+    min_score: float = 0.05,
+) -> list[tuple[str, int, float]]:
+    if not 0 <= min_score <= 1:
+        raise ValueError('The minimum retrieval score must be between 0 and 1.')
+    if not query_embedding or limit <= 0:
+        return []
+
+    ranked = []
+    for text, page_number, embedding in chunks:
+        score = cosine_similarity(query_embedding, embedding or [])
+        if score is None:
+            continue
+        if score >= min_score:
+            ranked.append((score, text, page_number))
+
+    ranked.sort(key=lambda result: result[0], reverse=True)
+    return [(text, page_number, score) for score, text, page_number in ranked[:limit]]
+
+
+def cosine_similarity(first: list[float], second: list[float]) -> float | None:
+    if not first or len(first) != len(second):
+        return None
+    first_magnitude = math.sqrt(sum(value * value for value in first))
+    second_magnitude = math.sqrt(sum(value * value for value in second))
+    if not first_magnitude or not second_magnitude:
+        return None
+    return sum(a * b for a, b in zip(first, second)) / (
+        first_magnitude * second_magnitude
+    )
 
 
 def _tokenize(text: str) -> list[str]:
